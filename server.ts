@@ -39,13 +39,113 @@ const BLOOMS_VERBS: Record<string, string[]> = {
   Create: ['Design', 'Construct', 'Formulate', 'Propose', 'Synthesize', 'Architect'],
 };
 
+// Generate entire examination paper in a single unified Gemini call (prevents 429 rate limits)
+async function generateFullPaperWithGemini(
+  slotsWithChunks: any[],
+  courseName: string,
+  blueprint: any
+) {
+  if (!aiClient) {
+    throw new Error('No AI client initialized');
+  }
+
+  const slotsDescription = slotsWithChunks
+    .map(
+      (item, idx) =>
+        `[Slot #${item.slot.slotId} - Q${item.slot.questionNumber}]:
+- Section: ${item.slot.sectionId}
+- Marks: ${item.slot.marks} Marks
+- Bloom Cognitive Level: ${item.slot.bloomsLevel}
+- Mandatory Action Verb: ${item.slot.actionVerb}
+- Difficulty: ${item.slot.difficulty}
+- Source Chapter: ${item.slot.chapterTitle}
+- Context Passage: "${item.chunk?.content || 'Core principles and applications.'}"`
+    )
+    .join('\n\n');
+
+  const prompt = `You are a distinguished university professor and chief examiner drafting an official examination paper for the course "${courseName}".
+
+Generate all examination questions for the following ${slotsWithChunks.length} question slots in a single balanced paper.
+Each question MUST strictly adhere to its assigned Bloom's Taxonomy cognitive level, difficulty, and mandatory action verb, and be grounded in its context passage.
+
+EXAM SLOTS SPECIFICATION:
+${slotsDescription}
+
+STRICT ACADEMIC REQUIREMENTS:
+1. Each question must strictly use its mandatory Action Verb (e.g. Define, Explain, Apply, Differentiate, Justify, Design).
+2. Cognitive depth must match the allocated marks (${blueprint.sections.map((s: any) => `${s.name}: ${s.marksPerQuestion}M`).join(', ')}).
+3. Ensure diversity: no two questions should ask about identical mechanisms or reuse phrasing.
+4. Provide an instructor Model Answer and a step-by-step Marking Rubric for every question. The rubric steps must sum exactly to that question's marks.
+
+Respond with a JSON object matching this schema:
+{
+  "questions": [
+    {
+      "slotId": "string",
+      "questionText": "string",
+      "actionVerb": "string",
+      "modelAnswer": "string",
+      "markingRubric": [
+        { "step": "string", "marks": number }
+      ]
+    }
+  ]
+}`;
+
+  const response = await aiClient.models.generateContent({
+    model: 'gemini-3.8-flash',
+    contents: prompt,
+    config: {
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          questions: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                slotId: { type: Type.STRING },
+                questionText: { type: Type.STRING },
+                actionVerb: { type: Type.STRING },
+                modelAnswer: { type: Type.STRING },
+                markingRubric: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      step: { type: Type.STRING },
+                      marks: { type: Type.NUMBER },
+                    },
+                    required: ['step', 'marks'],
+                  },
+                },
+              },
+              required: ['slotId', 'questionText', 'actionVerb', 'modelAnswer', 'markingRubric'],
+            },
+          },
+        },
+        required: ['questions'],
+      },
+    },
+  });
+
+  const parsed = JSON.parse(response.text?.trim() || '{}');
+  if (Array.isArray(parsed.questions) && parsed.questions.length > 0) {
+    return parsed.questions;
+  }
+  throw new Error('Gemini returned empty or invalid question array');
+}
+
 // Fallback high-fidelity question synthesis from context chunk
 function synthesizeFallbackQuestion(slot: any, chunk: any, verb: string) {
-  const concept = chunk?.keyConcepts?.[0] || 'the core architecture';
-  const concept2 = chunk?.keyConcepts?.[1] || 'alternative mechanisms';
+  const concepts = chunk?.keyConcepts || ['the core architecture', 'primary mechanism', 'system protocols'];
+  const conceptIdx = (slot.questionNumber - 1) % concepts.length;
+  const concept = concepts[conceptIdx] || 'the core architecture';
+  const concept2 = concepts[(conceptIdx + 1) % concepts.length] || 'alternative algorithms';
   const marks = slot.marks || 2;
   const level = slot.bloomsLevel || 'Remember';
-  const diff = slot.difficulty || 'Medium';
+  const sectionTitle = chunk?.sectionTitle || 'the syllabus';
 
   let qText = '';
   let modelAns = '';
@@ -53,67 +153,76 @@ function synthesizeFallbackQuestion(slot: any, chunk: any, verb: string) {
 
   switch (level) {
     case 'Remember':
-      qText = `${verb} ${concept} and state its primary role in ${chunk?.chapterTitle || 'the system'}.`;
-      modelAns = `${concept} is defined as a foundational construct. It ensures systematic coordination, predictable throughput, and structured resource management as detailed in ${chunk?.sectionTitle || 'the text'}.`;
+      if (marks <= 2) {
+        qText = `${verb} the term "${concept}" and state its fundamental purpose in ${chunk?.chapterTitle || 'modern computing'}.`;
+      } else {
+        qText = `${verb} the primary components and structural characteristics of ${concept} in relation to ${sectionTitle}.`;
+      }
+      modelAns = `${concept} is a fundamental architectural construct. Its primary purpose is to ensure predictable execution, robust coordination, and deterministic resource allocation as defined in ${sectionTitle}.`;
       rubric = [
-        { step: 'Accurate and concise definition', marks: Math.ceil(marks * 0.6) },
-        { step: 'Stating primary role and context', marks: Math.floor(marks * 0.4) },
+        { step: `Accurate definition of ${concept}`, marks: Math.ceil(marks * 0.6) },
+        { step: 'Identification of primary role and context', marks: Math.floor(marks * 0.4) },
       ];
       break;
 
     case 'Understand':
-      qText = `${verb} the operational mechanism of ${concept}, highlighting the interaction between its subcomponents.`;
-      modelAns = `${concept} operates by systematically processing state transitions. The workflow involves initialization, step-by-step verification, and synchronized execution, maintaining invariants described in ${chunk?.sectionTitle}.`;
+      if (marks <= 2) {
+        qText = `${verb} how ${concept} operates during steady-state processing.`;
+      } else {
+        qText = `${verb} the operational workflow of ${concept}, explaining the step-by-step coordination between its sub-modules.`;
+      }
+      modelAns = `${concept} functions by systematically managing internal transitions and coordinating dependencies. The operational sequence ensures data consistency and bounded overhead in accordance with principles outlined in ${sectionTitle}.`;
       rubric = [
-        { step: 'Explanation of core operational mechanism', marks: Math.ceil(marks * 0.5) },
-        { step: 'Component interaction and workflow clarity', marks: Math.floor(marks * 0.5) },
+        { step: 'Explanation of core operational principles', marks: Math.ceil(marks * 0.5) },
+        { step: 'Workflow coordination and module interaction', marks: Math.floor(marks * 0.5) },
       ];
       break;
 
     case 'Apply':
-      qText = `${verb} the principles of ${concept} to resolve an efficiency bottleneck in a system processing concurrent workloads.`;
-      modelAns = `To apply ${concept}, the system partitions the workload across discrete stages, applying bounds to minimize contention. Following the formula and protocol in ${chunk?.sectionTitle}, throughput is maximized while latency is bounded.`;
+      qText = `${verb} the principles of ${concept} to compute or resolve a resource contention scenario in a high-concurrency environment.`;
+      modelAns = `Applying ${concept} requires partitioning concurrent requests into discrete stages. By enforcing the algorithmic criteria and formulas of ${sectionTitle}, contention is mitigated and resource starvation is prevented.`;
       rubric = [
-        { step: 'Identification of applicable rules/formulas', marks: Math.ceil(marks * 0.4) },
-        { step: 'Step-by-step application to workload scenario', marks: Math.floor(marks * 0.6) },
+        { step: 'Application of relevant formulas and bounds', marks: Math.ceil(marks * 0.4) },
+        { step: 'Step-by-step scenario resolution', marks: Math.floor(marks * 0.6) },
       ];
       break;
 
     case 'Analyze':
-      qText = `${verb} ${concept} and ${concept2} with respect to latency, resource overhead, and failure resilience.`;
-      modelAns = `While ${concept} prioritizes low-overhead execution under steady-state conditions, ${concept2} offers superior fault tolerance under stress. Key trade-offs include memory footprint vs. convergence speed as noted in ${chunk?.sectionTitle}.`;
+      qText = `${verb} ${concept} and ${concept2} in terms of algorithmic complexity, memory overhead, and fault isolation.`;
+      modelAns = `A comparative analysis reveals that while ${concept} optimizes for minimal latency under low contention, ${concept2} provides superior fault isolation under peak load. Critical trade-offs involve state synchronization versus operational throughput as documented in ${sectionTitle}.`;
       rubric = [
-        { step: 'Comparative analysis across latency & overhead', marks: Math.ceil(marks * 0.5) },
-        { step: 'Detailed differentiation of failure modes', marks: Math.floor(marks * 0.5) },
+        { step: 'Comparative analysis of complexity and latency', marks: Math.ceil(marks * 0.5) },
+        { step: 'Detailed evaluation of trade-offs and failure modes', marks: Math.floor(marks * 0.5) },
       ];
       break;
 
     case 'Evaluate':
-      qText = `${verb} whether deploying ${concept} is justified over traditional approaches in high-throughput enterprise deployments.`;
-      modelAns = `Deploying ${concept} is justified when scalability and deterministic bounds outweigh initial configuration complexity. Based on empirical benchmarks in ${chunk?.sectionTitle}, the amortized return justifies the migration.`;
+      qText = `${verb} whether transitioning from ${concept2} to ${concept} is justified in mission-critical real-time deployments.`;
+      modelAns = `The transition to ${concept} is justified when rigorous deterministic bounds, high availability, and scalability outweigh the initial configuration complexity. Based on empirical criteria from ${sectionTitle}, the operational gains validate deployment.`;
       rubric = [
-        { step: 'Identification of critical evaluation criteria', marks: Math.ceil(marks * 0.4) },
-        { step: 'Critical justification and comparative verdict', marks: Math.floor(marks * 0.6) },
+        { step: 'Formulation of evaluation criteria and benchmarks', marks: Math.ceil(marks * 0.4) },
+        { step: 'Critical appraisal and defended verdict', marks: Math.floor(marks * 0.6) },
       ];
       break;
 
     case 'Create':
-      qText = `${verb} an end-to-end architectural framework incorporating ${concept} that ensures high availability and zero data corruption.`;
-      modelAns = `The proposed architecture integrates a distributed consensus layer with ${concept} acting as the primary transaction arbiter. Failover redundancy and boundary telemetry guarantee 99.99% availability as synthesized from ${chunk?.sectionTitle}.`;
+      qText = `${verb} an end-to-end fault-tolerant architectural framework incorporating ${concept} that ensures continuous availability and zero data loss.`;
+      modelAns = `The proposed architecture organizes ${concept} into a decoupled multi-tier topology with active-passive failover and automated state replication. Invariants derived from ${sectionTitle} ensure resilient recovery without violating consistency constraints.`;
       rubric = [
-        { step: 'System architecture specification & diagrammatic flow', marks: Math.ceil(marks * 0.5) },
-        { step: 'Resilience strategy and safety invariants', marks: Math.floor(marks * 0.5) },
+        { step: 'Comprehensive architectural schema and components', marks: Math.ceil(marks * 0.5) },
+        { step: 'Fault tolerance strategy and reliability guarantees', marks: Math.floor(marks * 0.5) },
       ];
       break;
 
     default:
-      qText = `${verb} the implications of ${concept} in modern computing systems.`;
-      modelAns = `A comprehensive treatment of ${concept} demonstrating clear mastery of underlying theoretical principles and practical trade-offs.`;
-      rubric = [{ step: 'Complete and well-structured answer', marks }];
+      qText = `${verb} the significance and application of ${concept} in contemporary system architecture.`;
+      modelAns = `An in-depth analysis of ${concept} reflecting mastery of theoretical foundations, implementation constraints, and practical design decisions.`;
+      rubric = [{ step: 'Comprehensive structured response', marks }];
   }
 
   return {
     questionText: qText,
+    actionVerb: verb,
     modelAnswer: modelAns,
     markingRubric: rubric,
   };
@@ -131,18 +240,14 @@ async function generateSingleQuestion(
     'Explain';
 
   if (!aiClient) {
-    const fallback = synthesizeFallbackQuestion(slot, contextChunk, chosenVerb);
-    return {
-      ...fallback,
-      actionVerb: chosenVerb,
-    };
+    return synthesizeFallbackQuestion(slot, contextChunk, chosenVerb);
   }
 
-  const prompt = `You are a distinguished university professor and chief examiner drafting an official examination paper for the course "${courseTitle}".
+  const prompt = `You are a distinguished university professor and chief examiner drafting an official examination question for "${courseTitle}".
 
-Generate exactly one examination question strictly following these parameters:
-- Target Cognitive Level: Bloom's Taxonomy "${slot.bloomsLevel}"
-- Mandatory Action Verb: The question MUST start with or feature the verb "${chosenVerb}"
+Generate exactly one examination question:
+- Cognitive Level: Bloom's Taxonomy "${slot.bloomsLevel}"
+- Mandatory Action Verb: The question MUST start with or prominently use "${chosenVerb}"
 - Difficulty Level: "${slot.difficulty}"
 - Assigned Marks: ${slot.marks} Marks
 - Course Context: Chapter "${contextChunk?.chapterTitle || 'Core Topics'}", Section "${contextChunk?.sectionTitle || 'General'}"
@@ -152,18 +257,16 @@ ${contextChunk?.content || 'Textbook core concepts and principles.'}
 """
 
 Requirements:
-1. Question Text: Academic, unambiguous, grammatically pristine. It must demand the appropriate depth for ${slot.marks} marks.
-2. Model Answer: An authoritative, concise instructor solution demonstrating full marks criteria.
-3. Marking Rubric: A breakdown of steps and partial marks summing exactly to ${slot.marks}.
+1. Question Text: Academic, unambiguous, grammatically pristine.
+2. Model Answer: An authoritative instructor solution.
+3. Marking Rubric: A breakdown of steps and marks summing to exactly ${slot.marks}.
 
-Respond with a JSON object matching this schema:
+Respond with JSON:
 {
   "questionText": "string",
   "actionVerb": "${chosenVerb}",
   "modelAnswer": "string",
-  "markingRubric": [
-    { "step": "string", "marks": number }
-  ]
+  "markingRubric": [{ "step": "string", "marks": number }]
 }`;
 
   try {
@@ -199,14 +302,10 @@ Respond with a JSON object matching this schema:
     if (parsed.questionText) {
       return parsed;
     }
-    throw new Error('Empty parsed output from Gemini');
-  } catch (err) {
-    console.warn('Gemini generation fallback triggered:', err);
-    const fallback = synthesizeFallbackQuestion(slot, contextChunk, chosenVerb);
-    return {
-      ...fallback,
-      actionVerb: chosenVerb,
-    };
+    throw new Error('Empty parsed output');
+  } catch (err: any) {
+    console.warn('Single question Gemini generation fallback triggered:', err?.message || err);
+    return synthesizeFallbackQuestion(slot, contextChunk, chosenVerb);
   }
 }
 
@@ -238,22 +337,19 @@ app.post('/api/generate-paper', async (req: Request, res: Response) => {
     } = blueprint;
 
     // Build question slots
-    const slots: any[] = [];
+    const slotsWithChunks: any[] = [];
     let qCounter = 1;
 
     // Normalized lists for Bloom's & Difficulty selection
     const bloomsKeys = Object.keys(bloomsDistribution || { Remember: 30, Understand: 30, Apply: 40 });
-    const diffKeys = ['Easy', 'Medium', 'Hard'];
     const chapters = knowledgeBase.chapters || [];
 
     sections.forEach((sec: any) => {
       for (let i = 0; i < sec.questionCount; i++) {
-        // pick bloom level rotating or by distribution
         const bLevel = bloomsKeys[(qCounter - 1) % bloomsKeys.length];
         const verbsList = BLOOMS_VERBS[bLevel] || ['Explain'];
         const chosenVerb = verbsList[(qCounter - 1) % verbsList.length];
 
-        // pick difficulty
         const dLevel =
           sec.marksPerQuestion <= 2
             ? 'Easy'
@@ -261,10 +357,18 @@ app.post('/api/generate-paper', async (req: Request, res: Response) => {
             ? 'Medium'
             : 'Hard';
 
-        // pick target chapter based on weightage
         const targetCh = chapters[(qCounter - 1) % chapters.length];
+        const chunk =
+          targetCh?.chunks?.find((ck: any) => ck.cognitiveAffinity?.includes(bLevel)) ||
+          targetCh?.chunks?.[(qCounter - 1) % (targetCh?.chunks?.length || 1)] ||
+          targetCh?.chunks?.[0] || {
+            chapterTitle: targetCh?.title || 'Core Curriculum',
+            sectionTitle: 'Foundations',
+            content: 'Core academic principles and mechanisms.',
+            keyConcepts: targetCh?.keyConcepts || ['Architecture'],
+          };
 
-        slots.push({
+        const slot = {
           slotId: `slot-${sec.id}-${i + 1}`,
           sectionId: sec.id,
           questionNumber: qCounter++,
@@ -274,26 +378,43 @@ app.post('/api/generate-paper', async (req: Request, res: Response) => {
           difficulty: dLevel,
           targetChapterId: targetCh?.id || 'ch-1',
           chapterTitle: targetCh?.title || 'Core Foundations',
-        });
+        };
+
+        slotsWithChunks.push({ slot, chunk });
       }
     });
 
-    // Generate questions for all slots in parallel with timeout/fallback safety
-    const generatedQuestions = await Promise.all(
-      slots.map(async (slot) => {
-        // Find relevant chunk in chapter
-        const ch = chapters.find((c: any) => c.id === slot.targetChapterId) || chapters[0];
-        const chunk =
-          ch?.chunks?.find((ck: any) => ck.cognitiveAffinity?.includes(slot.bloomsLevel)) ||
-          ch?.chunks?.[0] || {
-            chapterTitle: ch?.title || 'Core Curriculum',
-            sectionTitle: 'Principles',
-            content: 'Foundations and analytical principles.',
-            keyConcepts: ch?.keyConcepts || ['Architecture'],
-          };
+    // Attempt single-pass batched generation with Gemini AI
+    let aiQuestionsMap: Map<string, any> = new Map();
+    let usedAi = false;
 
-        const result = await generateSingleQuestion(slot, chunk, courseName || 'Engineering Assessment');
+    if (aiClient) {
+      try {
+        console.log(`Synthesizing full exam paper (${slotsWithChunks.length} questions) in 1 batched Gemini request...`);
+        const aiGeneratedList = await generateFullPaperWithGemini(
+          slotsWithChunks,
+          courseName || knowledgeBase.title,
+          blueprint
+        );
 
+        aiGeneratedList.forEach((q: any) => {
+          if (q.slotId) {
+            aiQuestionsMap.set(q.slotId, q);
+          }
+        });
+        usedAi = true;
+        console.log(`Gemini batch synthesis succeeded for ${aiQuestionsMap.size} questions.`);
+      } catch (err: any) {
+        console.warn('Gemini batch paper generation fallback triggered:', err?.message || err);
+        // Fallback gracefully to high-fidelity algorithmic synthesis without failing
+      }
+    }
+
+    // Assemble final questions
+    const generatedQuestions = slotsWithChunks.map(({ slot, chunk }, idx) => {
+      const aiResult = aiQuestionsMap.get(slot.slotId);
+
+      if (aiResult && aiResult.questionText) {
         return {
           id: `q-${Date.now()}-${slot.questionNumber}-${Math.random().toString(36).substring(2, 6)}`,
           slotId: slot.slotId,
@@ -301,21 +422,42 @@ app.post('/api/generate-paper', async (req: Request, res: Response) => {
           questionNumber: slot.questionNumber,
           marks: slot.marks,
           bloomsLevel: slot.bloomsLevel,
-          actionVerb: result.actionVerb || slot.actionVerb,
+          actionVerb: aiResult.actionVerb || slot.actionVerb,
           difficulty: slot.difficulty,
-          chapterId: ch?.id || 'ch-1',
-          chapterTitle: ch?.title || 'Core Foundations',
-          questionText: result.questionText,
+          chapterId: slot.targetChapterId,
+          chapterTitle: slot.chapterTitle,
+          questionText: aiResult.questionText,
           sourceChunkCitation: `${knowledgeBase.title} · ${chunk.sectionTitle || 'Section 1.1'}`,
           sourceChunkSnippet: chunk.content || '',
-          modelAnswer: result.modelAnswer,
-          markingRubric: result.markingRubric || [{ step: 'Complete solution', marks: slot.marks }],
+          modelAnswer: aiResult.modelAnswer || 'Instructor evaluation solution.',
+          markingRubric: aiResult.markingRubric || [{ step: 'Complete solution', marks: slot.marks }],
         };
-      })
-    );
+      }
+
+      // Fallback synthesis
+      const fallback = synthesizeFallbackQuestion(slot, chunk, slot.actionVerb);
+      return {
+        id: `q-${Date.now()}-${slot.questionNumber}-${Math.random().toString(36).substring(2, 6)}`,
+        slotId: slot.slotId,
+        sectionId: slot.sectionId,
+        questionNumber: slot.questionNumber,
+        marks: slot.marks,
+        bloomsLevel: slot.bloomsLevel,
+        actionVerb: fallback.actionVerb,
+        difficulty: slot.difficulty,
+        chapterId: slot.targetChapterId,
+        chapterTitle: slot.chapterTitle,
+        questionText: fallback.questionText,
+        sourceChunkCitation: `${knowledgeBase.title} · ${chunk.sectionTitle || 'Section 1.1'}`,
+        sourceChunkSnippet: chunk.content || '',
+        modelAnswer: fallback.modelAnswer,
+        markingRubric: fallback.markingRubric,
+      };
+    });
 
     res.json({
       success: true,
+      usedAi,
       questions: generatedQuestions,
     });
   } catch (error: any) {
