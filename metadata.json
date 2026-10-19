@@ -1,0 +1,6 @@
+{
+  "name": "ApexBloom - AI Question Paper Generator",
+  "description": "AI-powered automated question paper generation system using Bloom's Taxonomy, RAG textbook knowledge extraction, difficulty balancing, and university format export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
