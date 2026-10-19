@@ -133,4 +133,6 @@ export interface QuestionPaper {
   textbookTitle: string;
   questions: GeneratedQuestion[];
   qaReport: QAValidationReport;
+  engineUsed?: string;
 }
+

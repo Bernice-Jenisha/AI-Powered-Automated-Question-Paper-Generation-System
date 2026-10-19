@@ -153,6 +153,7 @@ export default function App() {
         textbookTitle: currentKb.title,
         questions: generatedQs,
         qaReport,
+        engineUsed: data.usedAi ? 'Gemini 3.8 Flash' : 'Local RAG Knowledge Engine (Active)',
       };
 
       setPaper(newPaper);

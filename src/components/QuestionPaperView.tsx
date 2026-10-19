@@ -141,6 +141,12 @@ export const QuestionPaperView: React.FC<QuestionPaperViewProps> = ({
               </span>
             )}
           </button>
+
+          {paper.engineUsed && (
+            <span className="text-xs text-slate-500 font-mono hidden lg:inline">
+              · {paper.engineUsed}
+            </span>
+          )}
         </div>
       </div>
 
